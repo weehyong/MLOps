@@ -1,63 +1,68 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+pool:
+  vmImage: 'Ubuntu 16.04'
+#Your build pipeline references a secret variable named ‘sp_username’. Create or edit the build pipeline for this YAML file, define the variable on the Variables tab, and then select the option to make it secret. See https://go.microsoft.com/fwlink/?linkid=865972
+#Your build pipeline references a secret variable named ‘sp_password’. Create or edit the build pipeline for this YAML file, define the variable on the Variables tab, and then select the option to make it secret. See https://go.microsoft.com/fwlink/?linkid=865972
+#Your build pipeline references a secret variable named ‘sp_tenantid’. Create or edit the build pipeline for this YAML file, define the variable on the Variables tab, and then select the option to make it secret. See https://go.microsoft.com/fwlink/?linkid=865972
+#Your build pipeline references a secret variable named ‘subscription_id’. Create or edit the build pipeline for this YAML file, define the variable on the Variables tab, and then select the option to make it secret. See https://go.microsoft.com/fwlink/?linkid=865972
+
+variables:
+- group: AzureKeyVaultSecrets
 
 trigger:
 - master
-
-pool:
-  vmImage: 'Ubuntu-16.04'
+- releases/*
+- develop
 
 steps:
 - task: UsePythonVersion@0
-  displayName: 'Use Python 3.6'
   inputs:
-    versionSpec: 3.6
-    
+    versionSpec: '3.6'
+    architecture: 'x64'   
+
+- task: Bash@3
+  displayName: 'Install Requirements'
+  inputs:
+    targetType: filePath
+    filePath: 'environment_setup/install_requirements.sh'
+    workingDirectory: 'environment_setup'
+
+- script: | 
+   az login --service-principal -u $(spidentity) -p $(spsecret) --tenant $(sptenant)
+   
+  displayName: 'Login to Azure'
+
 - script: |
-   pip install flake8
-   pip install flake8_formatter_junit_xml
-   flake8 --format junit-xml --output-file $(Build.BinariesDirectory)/flake8_report.xml --exit-zero --ignore E111
-  displayName: 'Check code quality'
-  
-- task: PublishTestResults@2
-  condition: succeededOrFailed()
-  inputs:
-    testResultsFiles: '$(Build.BinariesDirectory)/*_report.xml'
-    testRunTitle: 'Publish test results'
+   sed -i 's#"subscription_id": "<>"#"subscription_id": "$(subscriptionid)"#g' aml_config/config.json
+   
+  displayName: 'replace subscription value'
 
-- task: AzureCLI@1
-  inputs:
-    azureSubscription: 'build-demo'
-    scriptLocation: 'inlineScript'
-    inlineScript: 'az extension add -n azure-cli-ml'
-    workingDirectory: 'model-training'
+- script: 'pytest tests/unit/data_test.py'
+  displayName: 'Data Quality Check'
 
-- task: AzureCLI@1
-  inputs:
-    azureSubscription: 'build-demo'
-    scriptLocation: 'inlineScript'
-    inlineScript: 'az ml folder attach -w build-2019-demo -g scottgu-all-hands'
-    workingDirectory: ''
+- script: 'python aml_service/00-WorkSpace.py'
+  displayName: 'Get or Create Workspace'
 
-- task: AzureCLI@1
-  inputs:
-    azureSubscription: 'build-demo'
-    scriptLocation: 'inlineScript'
-    inlineScript: 'az ml run submit-script -c sklearn -e test -d training-env.yml train-sklearn.py'
-    workingDirectory: 'model-training'
+- script: 'python aml_service/03-AttachAmlCluster.py'
+  displayName: 'Create AML Compute Cluster'
 
-- task: AzureCLI@1
+- script: 'python aml_service/04-AmlPipelines.py'
+  displayName: 'Create and Test AML Pipeline'
+
+- script: 'python aml_service/04-AmlPipelines.py --pipeline_action publish'
+  displayName: 'Publish AML Pipeline as Endpoint'
+
+- task: CopyFiles@2
+  displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
   inputs:
-    azureSubscription: 'build-demo'
-    scriptLocation: 'inlineScript'
-    inlineScript: 'az ml model register -n mymodel -p sklearn_regression_model.pkl -t model.json'
-    workingDirectory: 'model-deployment'
-    
-- task: AzureCLI@1
+    SourceFolder: '$(Build.SourcesDirectory)'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    Contents: '**'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: devops-for-ai'
   inputs:
-    azureSubscription: 'build-demo'
-    scriptLocation: 'inlineScript'
-    inlineScript: 'az ml model deploy -n acicicd -f model.json --ic inferenceConfig.yml --dc aciDeploymentConfig.yml --overwrite'
-    workingDirectory: 'model-deployment'
+    ArtifactName: 'devops-for-ai'
+    publishLocation: 'container'
+    pathtoPublish: '$(Build.ArtifactStagingDirectory)' 
+    TargetPath: '$(Build.ArtifactStagingDirectory)'
+
